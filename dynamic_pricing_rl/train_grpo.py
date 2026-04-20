@@ -16,7 +16,7 @@ from unsloth import FastLanguageModel
 from dynamic_pricing_rl.envs.marketplace_env import DynamicPricingEnv
 
 
-MODEL_NAME = "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"
+MODEL_NAME = "unsloth/Qwen3.6-35B-A3B-bnb-4bit"
 INVALID_SAMPLE_PENALTY = -500.0
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -207,15 +207,9 @@ def main() -> None:
     model = FastLanguageModel.get_peft_model(
         model,
         r=16,
-        target_modules=[
-            "q_proj",
-            "k_proj",
-            "v_proj",
-            "o_proj",
-            "gate_proj",
-            "up_proj",
-            "down_proj",
-        ],
+        # CHANGE target_modules from the hardcoded list to "all-linear" 
+        # so Unsloth automatically maps the MoE expert routing layers.
+        target_modules="all-linear", 
         lora_alpha=16,
         lora_dropout=0.0,
         bias="none",
