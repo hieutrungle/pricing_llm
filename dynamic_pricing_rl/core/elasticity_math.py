@@ -58,3 +58,39 @@ def compute_market_step(
         "idle_drivers": idle_drivers,
         "total_profit": total_profit,
     }
+
+def get_optimal_multiplier(
+    riders: float,
+    drivers: float,
+    base_price: float,
+    device: torch.device,
+    min_m: float = 0.5,
+    max_m: float = 3.0,
+    steps: int = 2500
+) -> tuple[float, float]:
+    """
+    Brute-force the exact optimal price multiplier using PyTorch tensor broadcasting.
+    Returns: (optimal_multiplier, maximum_possible_profit)
+    """
+    # 1. Create a dense 1D grid of multipliers to test (Shape: [steps, 1])
+    m_grid = torch.linspace(min_m, max_m, steps, device=device).unsqueeze(-1)
+    
+    # 2. Expand the market state to match the grid size
+    active_riders = torch.full((steps, 1), riders, device=device)
+    active_drivers = torch.full((steps, 1), drivers, device=device)
+    base_prices = torch.full((steps, 1), base_price, device=device)
+    
+    # 3. Calculate profit for all 2,500 possible multipliers simultaneously
+    with torch.no_grad():
+        market_out = compute_market_step(
+            active_riders=active_riders,
+            active_drivers=active_drivers,
+            base_price=base_prices,
+            price_multiplier=m_grid,
+        )
+        profits = market_out["total_profit"].squeeze(-1)
+        
+    # 4. Find the multiplier that yielded the absolute highest profit
+    best_idx = torch.argmax(profits)
+    
+    return float(m_grid[best_idx].item()), float(profits[best_idx].item())

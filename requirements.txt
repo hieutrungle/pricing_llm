@@ -4,9 +4,10 @@ tensordict
 pytest
 unsloth
 vllm
-trl==1.2.0
+trl==0.24.0
 datasets==4.3.0
 accelerate==1.13.0
 peft==0.19.1
 bitsandbytes==0.49.2
-transformers==5.5.4
+transformers==4.57.6
+wandb>=0.19.0

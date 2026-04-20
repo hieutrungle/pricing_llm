@@ -90,7 +90,7 @@ class TrainConfig:
     max_steps: int = 200
 
     per_device_train_batch_size: int = 2
-    gradient_accumulation_steps: int = 2
+    gradient_accumulation_steps: int = 4
     learning_rate: float = 5e-6
 
     max_seq_length: int = 256
@@ -581,7 +581,7 @@ class RewardBridge:
                     "train/valid_samples": valid_count,
                     "train/total_samples": total_batch,
                 },
-                step=self._batch_index,
+                commit=False, # <--- ADD THIS
             )
 
         return rewards
@@ -629,9 +629,7 @@ class EpochEvalCallback(TrainerCallback):
         if model is None:
             return
             
-        LOGGER.info("=== Running Evaluation for Epoch %d ===", state.epoch)
-        
-        # Good practice: temporarily put model in eval mode
+        LOGGER.info("=== Running Evaluation for Epoch %s ===", state.epoch)
         model.eval()
         
         _run_post_training_eval(
@@ -639,10 +637,11 @@ class EpochEvalCallback(TrainerCallback):
             tokenizer=self.tokenizer,
             reward_bridge=self.reward_bridge,
             config=self.config,
-            wandb_run=self.wandb_run
+            wandb_run=self.wandb_run,
+            epoch=state.epoch,         # Pass the epoch
+            step=state.global_step     # Pass the global step
         )
         
-        # Return model to training mode
         model.train()
         
 
@@ -766,9 +765,13 @@ def _run_post_training_eval(
     reward_bridge: RewardBridge,
     config: TrainConfig,
     wandb_run: Any | None = None,
+    epoch: float | None = None,
+    step: int | None = None,
 ) -> None:
     """Optional quick sanity evaluation on fixed synthetic states."""
     LOGGER.info("Running post-training sanity eval on %d samples.", config.eval_samples)
+    
+    # Using a fixed seed ensures we evaluate on the EXACT same states every epoch
     rng = random.Random(config.seed + 1)
     prompts: list[str] = []
     for _ in range(config.eval_samples):
@@ -778,7 +781,6 @@ def _run_post_training_eval(
         time_of_day = float(rng.randint(0, 23))
         prompts.append(_format_market_prompt(tokenizer, riders, drivers, base_price, time_of_day, config))
         
-    # Temporarily switch to left padding for batched inference generation
     original_padding_side = tokenizer.padding_side
     tokenizer.padding_side = "left"
     
@@ -798,65 +800,77 @@ def _run_post_training_eval(
             eos_token_id=tokenizer.eos_token_id,
         )
 
-    
-    # Slice out the newly generated tokens safely using the input tensor length
     prompt_len = encoded["input_ids"].shape[1]
     new_tokens = generated[:, prompt_len:]
     completions = tokenizer.batch_decode(new_tokens, skip_special_tokens=True)
+    tokenizer.padding_side = original_padding_side
 
     eval_rewards = reward_bridge(prompts, completions)
+    
     eval_regrets: list[float] = []
     eval_multiplier_errors: list[float] = []
+    valid_parses = 0
     
-    # # print out some prompt-completion pairs for manual inspection
-    # for idx in rng.sample(range(len(prompts)), min(5, len(prompts))):
-    #     LOGGER.info("Eval sample %d:", idx)
-    #     LOGGER.info("Sample prompt: %s", prompts[idx][:600].replace('\n', ' '))
-    #     LOGGER.info("Sample completion: %s", completions[idx][:600].replace('\n', ' '))
-    #     LOGGER.info("Sample reward: %.4f", eval_rewards[idx])
-    #     LOGGER.info("Sample actual reward: %.4f", actual_rewards[idx])
-    #     print()
+    # Initialize a WandB Table to visualize outputs
+    eval_table = None
+    if wandb_run is not None:
+        import wandb
+        eval_table = wandb.Table(columns=["State", "LLM Multiplier", "Optimal Multiplier", "Regret ($)", "Completion Text"])
     
     for idx, (prompt, completion, reward) in enumerate(zip(prompts, completions, eval_rewards)):
         llm_multiplier = _parse_multiplier_from_completion(completion, debug=config.debug)
-        
         state = _parse_state_from_prompt(prompt)
-        if state is not None and llm_multiplier is not None:
+        
+        state_str = "Parse Error"
+        opt_m_str = "N/A"
+        llm_m_str = "Invalid"
+        regret_str = "N/A"
+        
+        if state is not None:
             riders, drivers, base_price, _ = state
+            state_str = f"R:{riders:.0f} D:{drivers:.0f} P:${base_price:.0f}"
             optimal_m, optimal_profit = get_optimal_multiplier(riders, drivers, base_price, DEVICE)
-            llm_profit = reward / config.reward_scale
-            regret = optimal_profit - llm_profit
-            m_error = abs(optimal_m - llm_multiplier)
-            eval_regrets.append(float(regret))
-            eval_multiplier_errors.append(float(m_error))
-            LOGGER.info(
-                "eval[%d] | LLM Multiplier: %.2f | Optimal Multiplier: %.2f | Error: %.2f",
-                idx, llm_multiplier, optimal_m, m_error
-            )
-            LOGGER.info(
-                "eval[%d] | LLM Profit: $%.2f | Optimal Profit: $%.2f | Regret: $%.2f",
-                idx, llm_profit, optimal_profit, regret
-            )
-        else:
-            LOGGER.info("eval[%d] Failed to parse valid multiplier. Reward: %.4f", idx, reward)
+            opt_m_str = f"{optimal_m:.2f}"
             
-    
-    # Restore original padding side for consistency
-    tokenizer.padding_side = original_padding_side
+            if llm_multiplier is not None:
+                valid_parses += 1
+                llm_profit = reward / config.reward_scale
+                regret = optimal_profit - llm_profit
+                m_error = abs(optimal_m - llm_multiplier)
+                
+                eval_regrets.append(float(regret))
+                eval_multiplier_errors.append(float(m_error))
+                
+                llm_m_str = f"{llm_multiplier:.2f}"
+                regret_str = f"{regret:.2f}"
 
-    if wandb_run is not None and eval_regrets:
-        regret_tensor = torch.tensor(eval_regrets, dtype=torch.float32)
-        m_error_tensor = torch.tensor(eval_multiplier_errors, dtype=torch.float32)
-        wandb_run.log(
-            {
+        # Add row to WandB table
+        if eval_table is not None:
+            eval_table.add_data(state_str, llm_m_str, opt_m_str, regret_str, completion[:200].replace('\n', ' '))
+
+    # Log metrics
+    if wandb_run is not None:
+        parse_success_rate = valid_parses / len(prompts) if prompts else 0.0
+        log_dict = {
+            "eval/parse_success": parse_success_rate,
+            "eval/predictions": eval_table
+        }
+        
+        if eval_regrets:
+            regret_tensor = torch.tensor(eval_regrets, dtype=torch.float32)
+            m_error_tensor = torch.tensor(eval_multiplier_errors, dtype=torch.float32)
+            log_dict.update({
                 "eval/regret_mean": float(regret_tensor.mean().item()),
                 "eval/regret_std": float(regret_tensor.std(unbiased=False).item()),
                 "eval/m_error_mean": float(m_error_tensor.mean().item()),
                 "eval/m_error_std": float(m_error_tensor.std(unbiased=False).item()),
-                "eval/parse_success": 1.0,
-            },
-            step=reward_bridge._batch_index,
-        )
+            })
+            
+        if epoch is not None:
+            log_dict["epoch"] = epoch
+            
+        # Use the actual global training step, not the eval bridge's step
+        wandb_run.log(log_dict, step=step)
 
 
 def main() -> None:
