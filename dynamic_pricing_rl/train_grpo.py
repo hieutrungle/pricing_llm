@@ -17,7 +17,7 @@ from dynamic_pricing_rl.envs.marketplace_env import DynamicPricingEnv
 
 
 MODEL_NAME = "unsloth/Qwen3.6-35B-A3B-bnb-4bit"
-INVALID_SAMPLE_PENALTY = -500.0
+INVALID_SAMPLE_PENALTY = -5.0
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 _STATE_PATTERN = re.compile(
@@ -174,7 +174,7 @@ def env_reward_func(prompts: list[str], completions: list[list[dict]]) -> list[f
 
     valid_indices = torch.where(valid_mask)[0].detach().cpu().tolist()
     for index in valid_indices:
-        rewards[index] = float(batch_rewards[index].item())
+        rewards[index] = float(batch_rewards[index].item()) / 1000.0 # Scale reward for more stable GRPO training
 
     return rewards
 
