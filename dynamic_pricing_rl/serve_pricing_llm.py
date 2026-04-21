@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from ast import literal_eval
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Any, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
-from transformers import CONFIG_MAPPING
+from transformers import AutoTokenizer, CONFIG_MAPPING, PreTrainedTokenizerBase
 from vllm import LLM, SamplingParams
 
 
@@ -47,6 +48,7 @@ _MULTIPLIER_PATTERN = re.compile(
 )
 
 _GLOBAL_LLM: Optional[LLM] = None
+_GLOBAL_TOKENIZER: Optional[PreTrainedTokenizerBase] = None
 
 
 def _setup_logging() -> None:
@@ -109,6 +111,21 @@ def _get_llm() -> LLM:
     return _GLOBAL_LLM
 
 
+def _get_prompt_tokenizer() -> PreTrainedTokenizerBase:
+    global _GLOBAL_TOKENIZER
+    if _GLOBAL_TOKENIZER is not None:
+        return _GLOBAL_TOKENIZER
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        CONFIG.model_path,
+        trust_remote_code=CONFIG.trust_remote_code,
+    )
+    if not isinstance(tokenizer, PreTrainedTokenizerBase):
+        raise TypeError("Loaded tokenizer is not a PreTrainedTokenizerBase instance")
+    _GLOBAL_TOKENIZER = tokenizer
+    return _GLOBAL_TOKENIZER
+
+
 class PriceRequest(BaseModel):
     riders: float = Field(..., ge=0.0)
     drivers: float = Field(..., ge=0.0)
@@ -147,27 +164,55 @@ def format_pricing_prompt(riders: float, drivers: float, base_price: float, time
         f"base_price: {base_price:.1f}, time: {time_of_day:.1f}]. "
         "What is the optimal price multiplier?"
     )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    tokenizer = _get_prompt_tokenizer()
+    if hasattr(tokenizer, "apply_chat_template"):
+        template_kwargs: dict[str, Any] = {
+            "tokenize": False,
+            "add_generation_prompt": True,
+        }
+        try:
+            formatted = tokenizer.apply_chat_template(messages, **template_kwargs)
+        except TypeError:
+            formatted = tokenizer.apply_chat_template(messages, tokenize=False)
+
+        if isinstance(formatted, str):
+            return formatted
+        return str(formatted)
+
     return f"System: {system_prompt}\nUser: {user_prompt}\nAssistant:"
 
 
 def parse_multiplier_from_text(text: str) -> float:
     """Extract multiplier from model text using JSON-first parsing with regex fallback."""
     parse_text = text.split("STOP", 1)[0]
+    parsed_multiplier: Optional[float] = None
 
     for match in _JSON_BLOCK_PATTERN.finditer(parse_text):
         payload = match.group(0).strip()
+        data: Any
         try:
             data = json.loads(payload)
         except json.JSONDecodeError:
-            continue
+            try:
+                data = literal_eval(payload)
+            except (ValueError, SyntaxError):
+                continue
         if not isinstance(data, dict):
             continue
         for key in ("multiplier", "price_multiplier"):
             if key in data:
                 try:
-                    return float(data[key])
+                    parsed_multiplier = float(data[key])
                 except (TypeError, ValueError):
                     continue
+
+    if parsed_multiplier is not None:
+        return parsed_multiplier
 
     regex_match: Optional[re.Match[str]] = None
     for match in _MULTIPLIER_PATTERN.finditer(parse_text):
@@ -194,8 +239,10 @@ def predict_price(request: PriceRequest) -> PriceResponse:
         max_tokens=CONFIG.max_tokens,
         temperature=CONFIG.temperature,
         top_p=CONFIG.top_p,
+        stop=["STOP"],
     )
 
+    text = ""
     try:
         outputs: List[Any] = _get_llm().generate([prompt], sampling_params)
         if not outputs or not outputs[0].outputs:
@@ -205,7 +252,7 @@ def predict_price(request: PriceRequest) -> PriceResponse:
     except HTTPException:
         raise
     except ValueError as error:
-        LOGGER.warning("Failed to parse completion into multiplier: %s", error)
+        LOGGER.warning("Failed to parse completion into multiplier: %s | raw=%r", error, text[:500] if isinstance(text, str) else text)
         raise HTTPException(status_code=422, detail=str(error)) from error
     except Exception as error:
         LOGGER.exception("Inference request failed")
