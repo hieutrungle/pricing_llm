@@ -85,9 +85,9 @@ class TrainConfig:
     logging_dir: str | None = None
     report_to: str = "none"
 
-    num_samples: int = 1000
-    num_train_epochs: int = 10
-    max_steps: int = 200
+    num_samples: int = 2000
+    num_train_epochs: int = 5
+    max_steps: int = -1
 
     per_device_train_batch_size: int = 2
     gradient_accumulation_steps: int = 4
@@ -96,11 +96,11 @@ class TrainConfig:
     max_seq_length: int = 256
     max_prompt_length: int = 256
     max_completion_length: int = 64
-    num_generations: int = 2
+    num_generations: int = 4
 
     lora_r: int = 8
     lora_alpha: int = 16
-    lora_dropout: float = 0.0
+    lora_dropout: float = 0.05
 
     load_in_4bit: bool = True
     fast_inference: bool = False
@@ -111,7 +111,7 @@ class TrainConfig:
     reward_clamp_max: float | None = None
 
     seed: int = SEED
-    logging_steps: int = 1
+    logging_steps: int = 100
     save_steps: int = 100
     enable_thinking: bool = False
     debug: bool = False
@@ -835,7 +835,7 @@ def _run_post_training_eval(
             if llm_multiplier is not None:
                 valid_parses += 1
                 llm_profit = reward / config.reward_scale
-                regret = optimal_profit - llm_profit
+                regret = abs(optimal_profit - llm_profit)
                 m_error = abs(optimal_m - llm_multiplier)
                 
                 eval_regrets.append(float(regret))

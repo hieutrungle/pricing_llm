@@ -124,3 +124,10 @@ context/
 temp/
 temp_*
 tmp_*
+
+# wandb
+wandb/
+
+# saved_checkpoints
+grpo_dynamic_pricing_outputs/
+dynamic_pricing_lora/
