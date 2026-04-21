@@ -521,7 +521,7 @@ class RewardBridge:
             base_price = float(state_tuple[2])
             optimal_m, optimal_profit = get_optimal_multiplier(riders, drivers, base_price, DEVICE)
             llm_profit = rewards[index] / self.config.reward_scale
-            valid_regrets.append(float(optimal_profit - llm_profit))
+            valid_regrets.append(float(abs(optimal_profit - llm_profit)))
             valid_multiplier_errors.append(float(abs(optimal_m - multiplier)))
 
         valid_count = len(valid_indices)
