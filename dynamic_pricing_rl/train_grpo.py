@@ -82,6 +82,7 @@ class TrainConfig:
     model_name: str = "unsloth/gemma-4-E4B-it"
     output_dir: str = "grpo_dynamic_pricing_outputs"
     save_path: str = DEFAULT_SAVE_PATH
+    cache_dir: str = "./tmp_model_cache"
     logging_dir: str | None = None
     report_to: str = "none"
 
@@ -159,6 +160,7 @@ def _parse_args() -> TrainConfig:
     parser.add_argument("--logging-dir", type=str, default=defaults.logging_dir)
     parser.add_argument("--logging-steps", type=int, default=defaults.logging_steps)
     parser.add_argument("--save-steps", type=int, default=defaults.save_steps)
+    parser.add_argument("--cache-dir", type=str, default=defaults.cache_dir)
 
     parser.add_argument("--seed", type=int, default=defaults.seed)
     parser.add_argument("--debug", action="store_true")
@@ -741,6 +743,7 @@ def _load_model_and_tokenizer(config: TrainConfig) -> tuple[Any, Any]:
         dtype=None,
         load_in_4bit=config.load_in_4bit,
         fast_inference=config.fast_inference,
+        cache_dir=config.cache_dir,
     )
     tokenizer.pad_token = tokenizer.eos_token
     # tokenizer.padding_side = "right"
